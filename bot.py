@@ -2,16 +2,19 @@ import logging
 import asyncio
 import random
 import os
-from aiohttp import web  # Import aiohttp for the health check server
-from pyrogram import Client, filters, idle
+from aiohttp import web
+from pyrogram import Client, filters, idle, enums
 from pyrogram.types import (
-    Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+    Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ReactionTypeEmoji
 )
 from motor.motor_asyncio import AsyncIOMotorClient
 from config import Config
 
 # --- Logger Setup ---
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
 # --- Database Setup (MongoDB) ---
@@ -35,18 +38,15 @@ async def health_check(request):
     return web.Response(text="Bot is Running!", status=200)
 
 async def start_web_server():
-    """Starts a small web server to satisfy Koyeb/Render health checks."""
     server = web.Application()
     server.router.add_get("/", health_check)
     runner = web.AppRunner(server)
     await runner.setup()
-    # Koyeb expects the app to listen on port 8080
     port = int(os.environ.get("PORT", 8080))
     await web.TCPSite(runner, "0.0.0.0", port).start()
     logger.info(f"Web server started on port {port}")
 
-# --- Helper Functions (Same as before) ---
-
+# --- Helper Functions ---
 def get_start_keyboard(bot_username):
     return InlineKeyboardMarkup([
         [
@@ -90,11 +90,10 @@ async def start_handler(client: Client, message: Message):
     me = await client.get_me()
     text = (
         "**👋 Professional Reaction Bot**\n\n"
-        "Here is how to use me:\n"
-        "1. Click the buttons below to add me to a Group or Channel.\n"
-        "2. Once added, I will send the `Chat ID` in that group.\n"
-        "3. Copy that ID and send it here to connect the chat.\n"
-        "4. Use /chat to configure reactions."
+        "1. Add me to a Group/Channel.\n"
+        "2. Copy the ID I send there.\n"
+        "3. Send the ID here to connect.\n"
+        "4. Use /chat to configure."
     )
     await message.reply_text(text, reply_markup=get_start_keyboard(me.username))
 
@@ -105,25 +104,23 @@ async def added_to_group(client: Client, message: Message):
         if member.id == me.id:
             try:
                 await message.reply_text(
-                    f"**✅ Bot Successfully Added!**\n\n"
-                    f"The ID of this chat is: `{message.chat.id}`\n\n"
-                    f"➡️ Copy this ID and send it to me in Private Message to connect."
+                    f"**✅ Bot Added!**\nID: `{message.chat.id}`\nSend this ID to me in PM."
                 )
             except Exception as e:
-                logger.error(f"Could not send message in {message.chat.id}: {e}")
+                logger.error(f"Could not send welcome message: {e}")
 
 @app.on_message(filters.regex(r"^-100\d+") & filters.private)
 async def connect_chat_handler(client: Client, message: Message):
     try:
         chat_id_input = int(message.text)
         user_id = message.from_user.id
-        
-        msg_wait = await message.reply_text("🔄 Verifying connection...")
+        msg_wait = await message.reply_text("🔄 Verifying...")
 
         try:
             chat_info = await client.get_chat(chat_id_input)
-        except Exception:
-            await msg_wait.edit("❌ I cannot find that chat. Make sure I am an Admin there!")
+        except Exception as e:
+            logger.error(f"Chat verification failed: {e}")
+            await msg_wait.edit("❌ I cannot find that chat. Make sure I am an Admin!")
             return
 
         existing = await chats_col.find_one({"user_id": user_id, "chat_id": chat_id_input})
@@ -136,25 +133,24 @@ async def connect_chat_handler(client: Client, message: Message):
                 "chat_title": chat_info.title,
                 "emojis": []
             })
-            await msg_wait.edit(f"✅ Successfully connected: **{chat_info.title}**\nUse /chat to configure reactions.")
-
+            await msg_wait.edit(f"✅ Connected: **{chat_info.title}**\nUse /chat to configure.")
     except ValueError:
-        await message.reply_text("❌ Invalid ID format. It usually starts with -100.")
+        await message.reply_text("❌ Invalid ID format.")
 
 @app.on_message(filters.command("chat") & filters.private)
 async def list_chats_handler(client: Client, message: Message):
     keyboard = await get_chat_selection_keyboard(message.from_user.id)
     if keyboard:
-        await message.reply_text("👇 Select a connected chat to configure reactions:", reply_markup=keyboard)
+        await message.reply_text("👇 Select chat to configure:", reply_markup=keyboard)
     else:
-        await message.reply_text("❌ You haven't connected any chats yet.\nSend me a Group/Channel ID first.")
+        await message.reply_text("❌ No connected chats.")
 
 @app.on_callback_query(filters.regex(r"select_chat_"))
 async def show_emoji_options(client: Client, callback: CallbackQuery):
     chat_id = callback.data.split("_")[2]
     user_id = callback.from_user.id
     keyboard = await get_emoji_keyboard(chat_id, user_id)
-    await callback.message.edit_text(f"Select reactions for Chat ID `{chat_id}`:", reply_markup=keyboard)
+    await callback.message.edit_text(f"Select reactions for `{chat_id}`:", reply_markup=keyboard)
 
 @app.on_callback_query(filters.regex(r"toggle_"))
 async def toggle_emoji(client: Client, callback: CallbackQuery):
@@ -168,7 +164,6 @@ async def toggle_emoji(client: Client, callback: CallbackQuery):
         return
 
     current_list = doc.get("emojis", [])
-
     if emoji in current_list:
         current_list.remove(emoji)
         action = "Removed"
@@ -188,35 +183,55 @@ async def toggle_emoji(client: Client, callback: CallbackQuery):
 @app.on_callback_query(filters.regex("back_to_chats"))
 async def back_button(client: Client, callback: CallbackQuery):
     keyboard = await get_chat_selection_keyboard(callback.from_user.id)
-    await callback.message.edit_text("👇 Select a connected chat to configure reactions:", reply_markup=keyboard)
+    await callback.message.edit_text("👇 Select chat:", reply_markup=keyboard)
+
+# --- DEBUGGED AUTO REACTION LOGIC ---
 
 @app.on_message(filters.group | filters.channel)
 async def auto_reaction_watcher(client: Client, message: Message):
     chat_id = message.chat.id
+    # logger.info(f"New Message in Chat: {chat_id} | Title: {message.chat.title}") # Enable if needed (spammy)
+
     doc = await chats_col.find_one({"chat_id": chat_id})
     
-    if doc and doc.get("emojis"):
-        active_emojis = doc["emojis"]
-        reaction = random.choice(active_emojis)
-        try:
-            await message.react(reaction)
-        except Exception:
-            pass
+    if not doc:
+        # Chat not in DB, ignoring
+        return
 
-# --- Main Execution Block ---
+    if not doc.get("emojis"):
+        logger.info(f"Chat {chat_id} is connected but has NO emojis selected.")
+        return
+
+    active_emojis = doc["emojis"]
+    reaction_emoji = random.choice(active_emojis)
+    
+    logger.info(f"Attempting to react with {reaction_emoji} in {chat_id}")
+
+    try:
+        # Try Method 1: Direct String
+        await message.react(reaction_emoji)
+        logger.info(f"✅ Success: Reacted {reaction_emoji} in {chat_id}")
+    except Exception as e:
+        logger.error(f"❌ Method 1 Failed: {e}")
+        try:
+            # Try Method 2: ReactionTypeEmoji Object (Stricter Pyrogram versions)
+            await message.react(reaction=[ReactionTypeEmoji(emoji=reaction_emoji)])
+            logger.info(f"✅ Success (Method 2): Reacted {reaction_emoji} in {chat_id}")
+        except Exception as e2:
+            logger.error(f"❌ CRITICAL FAILURE in {chat_id}: {e2}")
+            logger.error("👉 TIP: Make sure Bot is ADMIN with 'Add Reactions' permission!")
+
+# --- Main ---
 async def main():
     logger.info("Starting Web Server...")
     await start_web_server()
-    
     logger.info("Starting Bot...")
     await app.start()
-    
     logger.info("Bot & Web Server are Running!")
-    await idle() # Keeps the bot running
-    
+    await idle()
     await app.stop()
 
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.run_until_complete(main())
-                                     
+    
