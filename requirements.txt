@@ -3,4 +3,5 @@ tgcrypto
 motor
 dnspython
 python-dotenv
+aiohttp
 
