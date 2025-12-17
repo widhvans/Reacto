@@ -5,7 +5,7 @@ import os
 from aiohttp import web
 from pyrogram import Client, filters, idle, enums
 from pyrogram.types import (
-    Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ReactionTypeEmoji
+    Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 )
 from motor.motor_asyncio import AsyncIOMotorClient
 from config import Config
@@ -190,12 +190,10 @@ async def back_button(client: Client, callback: CallbackQuery):
 @app.on_message(filters.group | filters.channel)
 async def auto_reaction_watcher(client: Client, message: Message):
     chat_id = message.chat.id
-    # logger.info(f"New Message in Chat: {chat_id} | Title: {message.chat.title}") # Enable if needed (spammy)
-
+    
     doc = await chats_col.find_one({"chat_id": chat_id})
     
     if not doc:
-        # Chat not in DB, ignoring
         return
 
     if not doc.get("emojis"):
@@ -208,18 +206,11 @@ async def auto_reaction_watcher(client: Client, message: Message):
     logger.info(f"Attempting to react with {reaction_emoji} in {chat_id}")
 
     try:
-        # Try Method 1: Direct String
+        # Simplified reaction logic compatible with older Pyrogram versions
         await message.react(reaction_emoji)
         logger.info(f"✅ Success: Reacted {reaction_emoji} in {chat_id}")
     except Exception as e:
-        logger.error(f"❌ Method 1 Failed: {e}")
-        try:
-            # Try Method 2: ReactionTypeEmoji Object (Stricter Pyrogram versions)
-            await message.react(reaction=[ReactionTypeEmoji(emoji=reaction_emoji)])
-            logger.info(f"✅ Success (Method 2): Reacted {reaction_emoji} in {chat_id}")
-        except Exception as e2:
-            logger.error(f"❌ CRITICAL FAILURE in {chat_id}: {e2}")
-            logger.error("👉 TIP: Make sure Bot is ADMIN with 'Add Reactions' permission!")
+        logger.error(f"❌ Reaction Failed in {chat_id}: {e}")
 
 # --- Main ---
 async def main():
