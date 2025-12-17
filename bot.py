@@ -3,10 +3,14 @@ import asyncio
 import random
 import os
 from aiohttp import web
-from pyrogram import Client, filters, idle, enums
+from pyrogram import Client, filters, idle
 from pyrogram.types import (
     Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 )
+# --- Import Raw Types for the Fix ---
+from pyrogram.raw.functions.messages import SendReaction
+from pyrogram.raw.types import ReactionEmoji
+
 from motor.motor_asyncio import AsyncIOMotorClient
 from config import Config
 
@@ -83,6 +87,29 @@ async def get_emoji_keyboard(chat_id, user_id):
     buttons.append([InlineKeyboardButton("🔙 Back to Chats", callback_data="back_to_chats")])
     return InlineKeyboardMarkup(buttons)
 
+# --- Custom Secure Reaction Function (THE FIX) ---
+async def secure_reaction(client, chat_id, message_id, emoji):
+    """
+    Uses raw MTProto invocation to bypass Pyrogram's 'BOT_METHOD_INVALID' error.
+    """
+    try:
+        # Convert Chat ID to an InputPeer object that Telegram understands
+        peer = await client.resolve_peer(chat_id)
+        
+        # Manually construct the reaction request
+        await client.invoke(
+            SendReaction(
+                peer=peer,
+                msg_id=message_id,
+                big=True, # Makes the emoji appear "big" in the animation
+                reaction=[ReactionEmoji(emoticon=emoji)]
+            )
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Raw Invoke Failed: {e}")
+        return False
+
 # --- Handlers ---
 
 @app.on_message(filters.command("start") & filters.private)
@@ -118,8 +145,7 @@ async def connect_chat_handler(client: Client, message: Message):
 
         try:
             chat_info = await client.get_chat(chat_id_input)
-        except Exception as e:
-            logger.error(f"Chat verification failed: {e}")
+        except Exception:
             await msg_wait.edit("❌ I cannot find that chat. Make sure I am an Admin!")
             return
 
@@ -185,7 +211,7 @@ async def back_button(client: Client, callback: CallbackQuery):
     keyboard = await get_chat_selection_keyboard(callback.from_user.id)
     await callback.message.edit_text("👇 Select chat:", reply_markup=keyboard)
 
-# --- DEBUGGED AUTO REACTION LOGIC ---
+# --- AUTO REACTION LOGIC (Using Secure Fix) ---
 
 @app.on_message(filters.group | filters.channel)
 async def auto_reaction_watcher(client: Client, message: Message):
@@ -193,11 +219,7 @@ async def auto_reaction_watcher(client: Client, message: Message):
     
     doc = await chats_col.find_one({"chat_id": chat_id})
     
-    if not doc:
-        return
-
-    if not doc.get("emojis"):
-        logger.info(f"Chat {chat_id} is connected but has NO emojis selected.")
+    if not doc or not doc.get("emojis"):
         return
 
     active_emojis = doc["emojis"]
@@ -205,12 +227,13 @@ async def auto_reaction_watcher(client: Client, message: Message):
     
     logger.info(f"Attempting to react with {reaction_emoji} in {chat_id}")
 
-    try:
-        # Simplified reaction logic compatible with older Pyrogram versions
-        await message.react(reaction_emoji)
+    # Use our custom function instead of message.react
+    success = await secure_reaction(client, chat_id, message.id, reaction_emoji)
+    
+    if success:
         logger.info(f"✅ Success: Reacted {reaction_emoji} in {chat_id}")
-    except Exception as e:
-        logger.error(f"❌ Reaction Failed in {chat_id}: {e}")
+    else:
+        logger.error(f"❌ Still failed to react in {chat_id}")
 
 # --- Main ---
 async def main():
